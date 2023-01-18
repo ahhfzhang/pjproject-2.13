@@ -1,4 +1,4 @@
-/* 
+/*
  * Copyright (C)2019 Teluu Inc. (http://www.teluu.com)
  *
  * This program is free software; you can redistribute it and/or modify
@@ -13,7 +13,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA 
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include <pjmedia-codec/vpx.h>
 #include <pjmedia/vid_codec_util.h>
@@ -167,6 +167,8 @@ typedef struct vpx_codec_data
     unsigned                     dec_buf_size;
 } vpx_codec_data;
 
+#include "cdjpeg.h"
+struct jpeg_decompress_struct cinfo;
 
 PJ_DEF(pj_status_t) pjmedia_codec_vpx_vid_init(pjmedia_vid_codec_mgr *mgr,
                                                pj_pool_factory *pf)
@@ -438,7 +440,7 @@ static pj_status_t vpx_codec_open(pjmedia_vid_codec *codec,
         PJ_LOG(3, (THIS_FILE, "Failed to get encoder default config"));
         return PJMEDIA_CODEC_EFAILED;
     }
-    
+
     cfg.g_w = vpx_data->prm->enc_fmt.det.vid.size.w;
     cfg.g_h = vpx_data->prm->enc_fmt.det.vid.size.h;
     /* timebase is the inverse of fps */
@@ -446,7 +448,7 @@ static pj_status_t vpx_codec_open(pjmedia_vid_codec *codec,
     cfg.g_timebase.den = vpx_data->prm->enc_fmt.det.vid.fps.num;
     /* bitrate in KBps */
     cfg.rc_target_bitrate = vpx_data->prm->enc_fmt.det.vid.avg_bps / 1000;
-    
+
     cfg.g_pass = VPX_RC_ONE_PASS;
     cfg.rc_end_usage = VPX_CBR;
     cfg.g_threads = 4;
@@ -483,11 +485,7 @@ static pj_status_t vpx_codec_open(pjmedia_vid_codec *codec,
     /*
      * Decoder
      */
-    res = vpx_codec_dec_init(&vpx_data->dec, vpx_data->dec_if(), NULL, 0);
-    if (res) {
-        PJ_LOG(3, (THIS_FILE, "Failed to initialize decoder"));
-        return PJMEDIA_CODEC_EFAILED;
-    }
+    jpeg_create_decompress(&cinfo);
 
     /* Parse local fmtp */
     status = pjmedia_vid_codec_vpx_parse_fmtp(&param->dec_fmtp, &vpx_fmtp);
@@ -524,7 +522,9 @@ static pj_status_t vpx_codec_close(pjmedia_vid_codec *codec)
 
     vpx_data = (vpx_codec_data*) codec->codec_data;
     vpx_codec_destroy(&vpx_data->enc);
-    vpx_codec_destroy(&vpx_data->dec);
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
 
     return PJ_SUCCESS;
 }
@@ -606,7 +606,7 @@ static pj_status_t vpx_codec_encode_begin(pjmedia_vid_codec *codec,
                 vpx_data->enc_frame_is_keyframe = PJ_TRUE;
             else
                 vpx_data->enc_frame_is_keyframe = PJ_FALSE;
-                
+
             break;
         }
     } while (1);
@@ -623,7 +623,7 @@ static pj_status_t vpx_codec_encode_begin(pjmedia_vid_codec *codec,
             return PJ_SUCCESS;
         }
     }
-    
+
     if (vpx_data->whole) {
         *has_more = PJ_FALSE;
         if (vpx_data->enc_frame_size > out_size)
@@ -638,7 +638,7 @@ static pj_status_t vpx_codec_encode_begin(pjmedia_vid_codec *codec,
         }
 
         pj_memcpy(output->buf, vpx_data->enc_frame_whole, output->size);
-        
+
         return PJ_SUCCESS;
     }
 
@@ -658,7 +658,7 @@ static pj_status_t vpx_codec_encode_more(pjmedia_vid_codec *codec,
                      PJ_EINVAL);
 
     vpx_data = (vpx_codec_data*) codec->codec_data;
-    
+
     if (vpx_data->enc_processed < vpx_data->enc_frame_size) {
         unsigned payload_desc_size = 1;
         pj_size_t payload_len = out_size;
@@ -700,15 +700,17 @@ static pj_status_t vpx_codec_decode_(pjmedia_vid_codec *codec,
     struct vpx_codec_data *vpx_data;
     pj_bool_t has_frame = PJ_FALSE;
     unsigned i, whole_len = 0;
-    vpx_codec_iter_t iter = NULL;
-    vpx_image_t *img = NULL;
-    vpx_codec_err_t res;
+    // vpx_codec_iter_t iter = NULL;
+    // vpx_image_t *img = NULL;
+    // vpx_codec_err_t res;
     unsigned pos = 0;
-    int plane;
+    // int plane;
 
     PJ_ASSERT_RETURN(codec && count && packets && out_size && output,
                      PJ_EINVAL);
     PJ_ASSERT_RETURN(output->buf, PJ_EINVAL);
+
+    PJ_LOG(5,(THIS_FILE, "Input Data timestamp %lld whole_len %d count %d", packets[0].timestamp.u64, whole_len, count));
 
     vpx_data = (vpx_codec_data*) codec->codec_data;
 
@@ -755,36 +757,32 @@ static pj_status_t vpx_codec_decode_(pjmedia_vid_codec *codec,
     }
 
     /* Decode */
-    res = vpx_codec_decode(&vpx_data->dec, vpx_data->dec_buf, whole_len,
-                           0, VPX_DL_REALTIME);
-    if (res) {
-        PJ_LOG(4, (THIS_FILE, "Failed to decode frame %s",
-                   vpx_codec_error(&vpx_data->dec)));
+    // base https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/libjpeg.txt
+    jpeg_mem_src(&cinfo, vpx_data->dec_buf, whole_len);
+    jpeg_read_header(&cinfo, TRUE);
+    if (jpeg_start_decompress(&cinfo) == false) {
+        PJ_LOG(4, (THIS_FILE, "Failed to decoded frame"));
         goto on_return;
     }
 
-    img = vpx_codec_get_frame(&vpx_data->dec, &iter);
-    if (!img) {
-        PJ_LOG(4, (THIS_FILE, "Failed to get decoded frame %s",
-                   vpx_codec_error(&vpx_data->dec)));
-        goto on_return;
-    }
+    PJ_LOG(5,(THIS_FILE, "Decode W:%d H:%d color:%d", cinfo.image_width, cinfo.image_height, cinfo.jpeg_color_space));
 
+    /* Process data */
     has_frame = PJ_TRUE;
 
     /* Detect format change */
-    if (img->d_w != vpx_data->prm->dec_fmt.det.vid.size.w ||
-        img->d_h != vpx_data->prm->dec_fmt.det.vid.size.h)
+    if (cinfo.image_width != vpx_data->prm->dec_fmt.det.vid.size.w ||
+        cinfo.image_height != vpx_data->prm->dec_fmt.det.vid.size.h)
     {
         pjmedia_event event;
 
         PJ_LOG(4,(THIS_FILE, "Frame size changed: %dx%d --> %dx%d",
                   vpx_data->prm->dec_fmt.det.vid.size.w,
                   vpx_data->prm->dec_fmt.det.vid.size.h,
-                  img->d_w, img->d_h));
+                  cinfo.image_width, cinfo.image_height));
 
-        vpx_data->prm->dec_fmt.det.vid.size.w = img->d_w;
-        vpx_data->prm->dec_fmt.det.vid.size.h = img->d_h;
+        vpx_data->prm->dec_fmt.det.vid.size.w = cinfo.image_width;
+        vpx_data->prm->dec_fmt.det.vid.size.h = cinfo.image_height;
 
         /* Broadcast format changed event */
         pjmedia_event_init(&event, PJMEDIA_EVENT_FMT_CHANGED,
@@ -796,28 +794,21 @@ static pj_status_t vpx_codec_decode_(pjmedia_vid_codec *codec,
                               PJMEDIA_EVENT_PUBLISH_DEFAULT);
     }
 
-    if (img->d_w * img->d_h * 3/2 > output->size)
+    if (cinfo.image_width * cinfo.image_height * 3/2 > output->size)
         return PJMEDIA_CODEC_EFRMTOOSHORT;
 
     output->type = PJMEDIA_FRAME_TYPE_VIDEO;
     output->timestamp = packets[0].timestamp;
+    output->bit_info = PJMEDIA_VID_FRM_KEYFRAME;
 
-    for (plane = 0; plane < 3; ++plane) {
-        const unsigned char *buf = img->planes[plane];
-        const int stride = img->stride[plane];
-        const int w = (plane? img->d_w / 2: img->d_w);
-        const int h = (plane? img->d_h / 2: img->d_h);
-        int y;
-
-        for (y = 0; y < h; ++y) {
-            pj_memcpy((char *)output->buf + pos, buf, w);
-            pos += w;
-            buf += stride;
-        }
+    JDIMENSION num_scanlines;
+    while (cinfo.output_scanline < cinfo.output_height) {
+        num_scanlines = jpeg_read_scanlines(&cinfo, (JSAMPARRAY)output->buf + pos,
+                                                cinfo.image_height);
+        pos += num_scanlines*cinfo.image_width;
     }
-
     output->size = pos;
-        
+
 on_return:
     if (!has_frame) {
         pjmedia_event event;

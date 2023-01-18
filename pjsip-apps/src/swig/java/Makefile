@@ -155,7 +155,7 @@ endif
 
 # Build settings
 MY_CFLAGS	 := $(PJ_CXXFLAGS) $(MY_JNI_CFLAGS) $(CFLAGS)
-MY_LDFLAGS	 := $(PJ_LDXXFLAGS) $(PJ_LDXXLIBS) $(MY_JNI_LDXXLIBS) $(MY_JNI_LDFLAGS) $(LDFLAGS)
+MY_LDFLAGS	 := $(PJ_LDXXFLAGS) $(PJ_LDXXLIBS) $(MY_JNI_LDXXLIBS) $(MY_JNI_LDFLAGS) $(LDFLAGS) -L../../../../third_party/libturbojpeg/lib/ -lturbojpeg -ljpeg
 MY_PACKAGE_NAME	 := org.pjsip.pjsua2
 ifeq ($(OS),android)
   MY_PACKAGE_PATH  := android/pjsua2/src/main/java/$(subst .,/,$(MY_PACKAGE_NAME))

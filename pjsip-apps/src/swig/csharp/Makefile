@@ -38,7 +38,7 @@ endif
 
 # Build settings
 MY_CFLAGS	 := $(PJ_CXXFLAGS) $(CFLAGS)
-MY_LDFLAGS	 := $(PJ_LDXXFLAGS) $(PJ_LDXXLIBS) $(LDFLAGS)
+MY_LDFLAGS	 := $(PJ_LDXXFLAGS) $(PJ_LDXXLIBS) $(LDFLAGS) -L../../../../third_party/libturbojpeg/lib/ -lturbojpeg -ljpeg
 
 .PHONY: all install uninstall
 

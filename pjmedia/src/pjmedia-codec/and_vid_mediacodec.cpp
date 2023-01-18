@@ -30,6 +30,8 @@
 /* Android AMediaCodec: */
 #include "media/NdkMediaCodec.h"
 
+#include "cdjpeg.h"
+static struct jpeg_decompress_struct cinfo;
 /*
  * Constants
  */
@@ -926,10 +928,11 @@ static pj_status_t and_media_codec_open(pjmedia_vid_codec *codec,
     if (status != PJ_SUCCESS) {
         return PJMEDIA_CODEC_EFAILED;
     }
-    status = configure_decoder(and_media_data);
-    if (status != PJ_SUCCESS) {
-        return PJMEDIA_CODEC_EFAILED;
-    }
+    // status = configure_decoder(and_media_data);
+    // if (status != PJ_SUCCESS) {
+    //     return PJMEDIA_CODEC_EFAILED;
+    jpeg_create_decompress(&cinfo);
+
     if (and_media_data->dec_buf_size == 0) {
         and_media_data->dec_buf_size = (MAX_RX_WIDTH * MAX_RX_HEIGHT * 3 >> 1) +
                                        (MAX_RX_WIDTH);
@@ -946,6 +949,8 @@ static pj_status_t and_media_codec_close(pjmedia_vid_codec *codec)
 {
     PJ_ASSERT_RETURN(codec, PJ_EINVAL);
     PJ_UNUSED_ARG(codec);
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
     return PJ_SUCCESS;
 }
 
@@ -1851,6 +1856,7 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
                               pjmedia_frame *output)
 {
     unsigned i, whole_len = 0;
+    unsigned pos = 0;
     pj_status_t status;
     and_media_codec_data *and_media_data =
                                       (and_media_codec_data*) codec->codec_data;
@@ -1859,6 +1865,7 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
     PJ_ASSERT_RETURN(codec && count && packets && out_size && output,
                      PJ_EINVAL);
     PJ_ASSERT_RETURN(output->buf, PJ_EINVAL);
+    PJ_LOG(5,(THIS_FILE, "Input Data timestamp %lld out_size %d count %d whole %d", packets[0].timestamp.u64, out_size, count, and_media_data->whole));
 
     whole_len = 0;
     if (and_media_data->whole) {
@@ -1903,17 +1910,39 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
                 return PJMEDIA_CODEC_EFRMTOOSHORT;
             }
 
-            write_output = (i == count - 1);
+            // write_output = (i == count - 1);
 
-            status = and_media_decode(codec, and_media_data,
-                                  (pj_uint8_t *)packets[i].buf + desc_len,
-                                  packet_size, 0, &packets[0].timestamp,
-                                  write_output, output);
-            if (status != PJ_SUCCESS)
-                return status;
+            // status = and_media_decode(codec, and_media_data,
+            //                       (pj_uint8_t *)packets[i].buf + desc_len,
+            //                       packet_size, 0, &packets[0].timestamp,
+            //                       write_output, output);
+            // if (status != PJ_SUCCESS)
+
+            pj_memcpy(and_media_data->dec_buf + whole_len,
+                      (char *)packets[i].buf + desc_len, packet_size);
 
             whole_len += packet_size;
         }
+        jpeg_mem_src(&cinfo, and_media_data->dec_buf, whole_len);
+        jpeg_read_header(&cinfo, TRUE);
+        if (jpeg_start_decompress(&cinfo) == false) {
+            PJ_LOG(4, (THIS_FILE, "Failed to decoded frame"));
+            return PJMEDIA_CODEC_EFRMTOOSHORT;
+        }
+        PJ_LOG(5,(THIS_FILE, "Decode whole_len %d W:%d H:%d color:%d", whole_len, cinfo.image_width, cinfo.image_height, cinfo.jpeg_color_space));
+        and_media_data->dec_has_output_frame = PJ_TRUE;
+        if (cinfo.image_width * cinfo.image_height * 3/2 > output->size)
+        return PJMEDIA_CODEC_EFRMTOOSHORT;
+        output->type = PJMEDIA_FRAME_TYPE_VIDEO;
+        output->timestamp = packets[0].timestamp;
+        output->bit_info = PJMEDIA_VID_FRM_KEYFRAME;
+        JDIMENSION num_scanlines;
+        while (cinfo.output_scanline < cinfo.output_height) {
+            num_scanlines = jpeg_read_scanlines(&cinfo, (JSAMPARRAY)output->buf + pos,
+                                                    cinfo.image_height);
+            pos += num_scanlines*cinfo.image_width;
+        }
+        output->size = pos;
     }
     return PJ_SUCCESS;
 }
