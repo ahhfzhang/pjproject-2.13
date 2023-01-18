@@ -30,8 +30,10 @@
 /* Android AMediaCodec: */
 #include "media/NdkMediaCodec.h"
 
+
 #include "cdjpeg.h"
 static struct jpeg_decompress_struct cinfo;
+
 /*
  * Constants
  */
@@ -931,7 +933,9 @@ static pj_status_t and_media_codec_open(pjmedia_vid_codec *codec,
     // status = configure_decoder(and_media_data);
     // if (status != PJ_SUCCESS) {
     //     return PJMEDIA_CODEC_EFAILED;
+    // }
     jpeg_create_decompress(&cinfo);
+    PJ_LOG(4, (THIS_FILE, "Create JPEG decoder"));
 
     if (and_media_data->dec_buf_size == 0) {
         and_media_data->dec_buf_size = (MAX_RX_WIDTH * MAX_RX_HEIGHT * 3 >> 1) +
@@ -951,6 +955,7 @@ static pj_status_t and_media_codec_close(pjmedia_vid_codec *codec)
     PJ_UNUSED_ARG(codec);
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
+    PJ_LOG(4, (THIS_FILE, "Close JPEG decoder"));
     return PJ_SUCCESS;
 }
 
@@ -1865,7 +1870,8 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
     PJ_ASSERT_RETURN(codec && count && packets && out_size && output,
                      PJ_EINVAL);
     PJ_ASSERT_RETURN(output->buf, PJ_EINVAL);
-    PJ_LOG(5,(THIS_FILE, "Input Data timestamp %lld out_size %d count %d whole %d", packets[0].timestamp.u64, out_size, count, and_media_data->whole));
+
+    PJ_LOG(4,(THIS_FILE, "Input Data timestamp %lld out_size %d count %d whole %d", packets[0].timestamp.u64, out_size, count, and_media_data->whole));
 
     whole_len = 0;
     if (and_media_data->whole) {
@@ -1917,25 +1923,61 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
             //                       packet_size, 0, &packets[0].timestamp,
             //                       write_output, output);
             // if (status != PJ_SUCCESS)
+            //     return status;
 
             pj_memcpy(and_media_data->dec_buf + whole_len,
                       (char *)packets[i].buf + desc_len, packet_size);
 
             whole_len += packet_size;
         }
+
+        PJ_LOG(4,(THIS_FILE, "unpacket Data whole %d", whole_len));
+
+        /* Decode */
+        // base https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/libjpeg.txt
         jpeg_mem_src(&cinfo, and_media_data->dec_buf, whole_len);
         jpeg_read_header(&cinfo, TRUE);
         if (jpeg_start_decompress(&cinfo) == false) {
             PJ_LOG(4, (THIS_FILE, "Failed to decoded frame"));
             return PJMEDIA_CODEC_EFRMTOOSHORT;
         }
-        PJ_LOG(5,(THIS_FILE, "Decode whole_len %d W:%d H:%d color:%d", whole_len, cinfo.image_width, cinfo.image_height, cinfo.jpeg_color_space));
+
+        PJ_LOG(4,(THIS_FILE, "Decode whole_len %d W:%d H:%d color:%d", whole_len, cinfo.image_width, cinfo.image_height, cinfo.jpeg_color_space));
+
+        /* Process data */
         and_media_data->dec_has_output_frame = PJ_TRUE;
+
+        /* Detect format change */
+        // if (cinfo.image_width != vpx_data->prm->dec_fmt.det.vid.size.w ||
+        //     cinfo.image_height != vpx_data->prm->dec_fmt.det.vid.size.h)
+        // {
+        //     pjmedia_event event;
+
+        //     PJ_LOG(4,(THIS_FILE, "Frame size changed: %dx%d --> %dx%d",
+        //             vpx_data->prm->dec_fmt.det.vid.size.w,
+        //             vpx_data->prm->dec_fmt.det.vid.size.h,
+        //             cinfo.image_width, cinfo.image_height));
+
+        //     vpx_data->prm->dec_fmt.det.vid.size.w = cinfo.image_width;
+        //     vpx_data->prm->dec_fmt.det.vid.size.h = cinfo.image_height;
+
+        //     /* Broadcast format changed event */
+        //     pjmedia_event_init(&event, PJMEDIA_EVENT_FMT_CHANGED,
+        //                     &packets[0].timestamp, codec);
+        //     event.data.fmt_changed.dir = PJMEDIA_DIR_DECODING;
+        //     pjmedia_format_copy(&event.data.fmt_changed.new_fmt,
+        //                         &vpx_data->prm->dec_fmt);
+        //     pjmedia_event_publish(NULL, codec, &event,
+        //                         PJMEDIA_EVENT_PUBLISH_DEFAULT);
+        // }
+
         if (cinfo.image_width * cinfo.image_height * 3/2 > output->size)
         return PJMEDIA_CODEC_EFRMTOOSHORT;
+
         output->type = PJMEDIA_FRAME_TYPE_VIDEO;
         output->timestamp = packets[0].timestamp;
         output->bit_info = PJMEDIA_VID_FRM_KEYFRAME;
+
         JDIMENSION num_scanlines;
         while (cinfo.output_scanline < cinfo.output_height) {
             num_scanlines = jpeg_read_scanlines(&cinfo, (JSAMPARRAY)output->buf + pos,
