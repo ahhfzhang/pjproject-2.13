@@ -11,6 +11,8 @@ ifneq (@ac_no_ilbc_codec@,1)
 DIRS += ilbc
 endif
 
+DIRS += jpeg
+
 # Exclude Speex?
 EXCLUDE_SPEEX = 0
 ifeq (@ac_no_speex_codec@,1)

@@ -30,6 +30,8 @@
 /* Android AMediaCodec: */
 #include "media/NdkMediaCodec.h"
 
+#include "cdjpeg.h"
+
 /*
  * Constants
  */
@@ -926,10 +928,11 @@ static pj_status_t and_media_codec_open(pjmedia_vid_codec *codec,
     if (status != PJ_SUCCESS) {
         return PJMEDIA_CODEC_EFAILED;
     }
-    status = configure_decoder(and_media_data);
-    if (status != PJ_SUCCESS) {
-        return PJMEDIA_CODEC_EFAILED;
-    }
+    // status = configure_decoder(and_media_data);
+    // if (status != PJ_SUCCESS) {
+    //     return PJMEDIA_CODEC_EFAILED;
+    // }
+
     if (and_media_data->dec_buf_size == 0) {
         and_media_data->dec_buf_size = (MAX_RX_WIDTH * MAX_RX_HEIGHT * 3 >> 1) +
                                        (MAX_RX_WIDTH);
@@ -1844,13 +1847,85 @@ static pj_status_t encode_more_vpx(and_media_codec_data *and_media_data,
     return status;
 }
 
+static int _check_jpeg_header(uint8_t *data, uint32_t size)
+{
+    uint16_t marker;
+    uint32_t ofs;
+
+    if (size < 64) {
+        return false;
+    }
+
+    ofs = marker = 0;
+    /* Find SOI marker */
+    do {
+        if (ofs > size - 1) {
+            return false;
+        }
+        marker = marker << 8 | data[ofs];
+        ofs++;
+    } while (marker != 0xFFD8);
+
+    /* Find SOF marker */
+    marker = 0;
+    do {
+        if (ofs > size - 1) {
+            return false;
+        }
+        marker = marker << 8 | data[ofs];
+        ofs++;
+    } while (marker != 0xFFC0);
+
+    /* Find EOI marker */
+    marker = 0;
+    if (size - ofs > 2048) {
+        ofs = size - 2048;
+    }
+    do {
+        if (ofs > size - 1) {
+            return false;
+        }
+        marker = marker << 8 | data[ofs];
+        ofs++;
+    } while (marker != 0xFFD9);
+
+    return true;
+}
+
+void rgb_to_i420(unsigned char* src, unsigned char* dst, int width, int height) {
+    int y_size = width * height;
+    int uv_size = y_size / 4;
+    int r, g, b, y, u, v;
+    int i, j, k;
+    int index = 0;
+    unsigned char* yuv_y = dst;
+    unsigned char* yuv_u = dst + y_size;
+    unsigned char* yuv_v = dst + y_size + uv_size;
+    for (i = 0; i < height; i++) {
+        for (j = 0; j < width; j++) {
+            r = src[index++];
+            g = src[index++];
+            b = src[index++];
+            y = (int)(0.299 * r + 0.587 * g + 0.114 * b);
+            u = (int)((b - y) * 0.493 + 128);
+            v = (int)((r - y) * 0.877 + 128);
+            *(yuv_y++) = (unsigned char)y;
+            if (i % 2 == 0 && j % 2 == 0) {
+                *(yuv_u++) = (unsigned char)u;
+                *(yuv_v++) = (unsigned char)v;
+            }
+        }
+    }
+}
+
 static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
                               pj_size_t count,
                               pjmedia_frame packets[],
                               unsigned out_size,
                               pjmedia_frame *output)
 {
-    unsigned i, whole_len = 0;
+    unsigned i;
+    unsigned long whole_len = 0;
     pj_status_t status;
     and_media_codec_data *and_media_data =
                                       (and_media_codec_data*) codec->codec_data;
@@ -1860,61 +1935,131 @@ static pj_status_t decode_vpx(pjmedia_vid_codec *codec,
                      PJ_EINVAL);
     PJ_ASSERT_RETURN(output->buf, PJ_EINVAL);
 
-    whole_len = 0;
-    if (and_media_data->whole) {
-        for (i = 0; i < count; ++i) {
-            if (whole_len + packets[i].size > and_media_data->dec_buf_size) {
-                PJ_LOG(4,(THIS_FILE, "Decoding buffer overflow [1]"));
-                return PJMEDIA_CODEC_EFRMTOOSHORT;
-            }
+    PJ_LOG(4,(THIS_FILE, "Input Data timestamp %lld out_size %d count %d whole %d", packets[0].timestamp.u64, out_size, count, and_media_data->whole));
 
-            pj_memcpy( and_media_data->dec_buf + whole_len,
-                       (pj_uint8_t*)packets[i].buf,
-                       packets[i].size);
-            whole_len += packets[i].size;
-        }
-        status = and_media_decode(codec, and_media_data,
-                                  and_media_data->dec_buf, whole_len, 0,
-                                  &packets[0].timestamp, PJ_TRUE, output);
+    for (i = 0; i < count; ++i) {
+        unsigned desc_len;
+        unsigned packet_size = packets[i].size;
+        pj_bool_t write_output;
 
-        if (status != PJ_SUCCESS)
+        status = pjmedia_vpx_unpacketize(vpx_data->pktz,
+                                            (pj_uint8_t *)packets[i].buf,
+                                            packet_size,
+                                            &desc_len);
+        if (status != PJ_SUCCESS) {
+            PJ_LOG(4,(THIS_FILE, "Unpacketize error packet size[%d]",
+                        packet_size));
             return status;
-
-    } else {
-        for (i = 0; i < count; ++i) {
-            unsigned desc_len;
-            unsigned packet_size = packets[i].size;
-            pj_status_t status;
-            pj_bool_t write_output;
-
-            status = pjmedia_vpx_unpacketize(vpx_data->pktz,
-                                             (pj_uint8_t *)packets[i].buf,
-                                             packet_size,
-                                             &desc_len);
-            if (status != PJ_SUCCESS) {
-                PJ_LOG(4,(THIS_FILE, "Unpacketize error packet size[%d]",
-                          packet_size));
-                return status;
-            }
-
-            packet_size -= desc_len;
-            if (whole_len + packet_size > and_media_data->dec_buf_size) {
-                PJ_LOG(4,(THIS_FILE, "Decoding buffer overflow [2]"));
-                return PJMEDIA_CODEC_EFRMTOOSHORT;
-            }
-
-            write_output = (i == count - 1);
-
-            status = and_media_decode(codec, and_media_data,
-                                  (pj_uint8_t *)packets[i].buf + desc_len,
-                                  packet_size, 0, &packets[0].timestamp,
-                                  write_output, output);
-            if (status != PJ_SUCCESS)
-                return status;
-
-            whole_len += packet_size;
         }
+
+        packet_size -= desc_len;
+        if (whole_len + packet_size > and_media_data->dec_buf_size) {
+            PJ_LOG(4,(THIS_FILE, "Decoding buffer overflow [2]"));
+            return PJMEDIA_CODEC_EFRMTOOSHORT;
+        }
+
+        // write_output = (i == count - 1);
+        // status = and_media_decode(codec, and_media_data,
+        //                       (pj_uint8_t *)packets[i].buf + desc_len,
+        //                       packet_size, 0, &packets[0].timestamp,
+        //                       write_output, output);
+        // if (status != PJ_SUCCESS)
+        //     return status;
+
+        pj_memcpy(and_media_data->dec_buf + whole_len,
+                    (char *)packets[i].buf + desc_len, packet_size);
+
+        whole_len += packet_size;
     }
+
+    if (_check_jpeg_header(and_media_data->dec_buf, whole_len) == PJ_FALSE) {
+        and_media_data->dec_has_output_frame = PJ_FALSE;
+        PJ_LOG(4,(THIS_FILE, "wrong jpeg frame"));
+    } else {
+        /* Decode */
+        // base https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/libjpeg.txt
+
+        unsigned char *_input_buf = (unsigned char *)calloc(1, whole_len+1);
+        PJ_ASSERT_RETURN(_input_buf, PJ_EINVAL);
+        memcpy(_input_buf, and_media_data->dec_buf, whole_len);
+
+        struct jpeg_error_mgr jerr;
+        struct jpeg_decompress_struct cinfo;
+        cinfo.err = jpeg_std_error(&jerr);
+        jpeg_create_decompress(&cinfo);
+        // PJ_LOG(4, (THIS_FILE, "Create JPEG decoder"));
+
+        jpeg_mem_src(&cinfo, _input_buf, whole_len);
+        jpeg_read_header(&cinfo, TRUE);
+
+        // cinfo.out_color_space = JCS_YCbCr;
+        if (jpeg_start_decompress(&cinfo) == false) {
+            PJ_LOG(4, (THIS_FILE, "Failed to decoded frame"));
+            free(_input_buf);
+            return PJMEDIA_CODEC_EFRMTOOSHORT;
+        }
+
+        PJ_LOG(4,(THIS_FILE, "Decode whole_len %d W:%d H:%d color:%d", whole_len, cinfo.image_width, cinfo.image_height, cinfo.jpeg_color_space));
+
+        /* Detect format change */
+        if (cinfo.image_width != and_media_data->prm->dec_fmt.det.vid.size.w ||
+            cinfo.image_height != and_media_data->prm->dec_fmt.det.vid.size.h)
+        {
+            pjmedia_event event;
+
+            and_media_data->prm->dec_fmt.det.vid.size.w = cinfo.image_width;
+            and_media_data->prm->dec_fmt.det.vid.size.h = cinfo.image_height;
+
+            PJ_LOG(4,(THIS_FILE, "Frame size changed to %dx%d",
+                      and_media_data->prm->dec_fmt.det.vid.size.w,
+                      and_media_data->prm->dec_fmt.det.vid.size.h));
+
+            /* Broadcast format changed event */
+            pjmedia_event_init(&event, PJMEDIA_EVENT_FMT_CHANGED,
+                               &output->timestamp, codec);
+            event.data.fmt_changed.dir = PJMEDIA_DIR_DECODING;
+            pjmedia_format_copy(&event.data.fmt_changed.new_fmt,
+                                &and_media_data->prm->dec_fmt);
+            pjmedia_event_publish(NULL, codec, &event,
+                                  PJMEDIA_EVENT_PUBLISH_DEFAULT);
+        }
+
+        /* Process data */
+        if (cinfo.image_width * cinfo.image_height * 3/2 > output->size)
+        return PJMEDIA_CODEC_EFRMTOOSHORT;
+
+        output->type = PJMEDIA_FRAME_TYPE_VIDEO;
+        output->timestamp = packets[0].timestamp;
+        output->bit_info = PJMEDIA_VID_FRM_KEYFRAME;
+        and_media_data->dec_has_output_frame = PJ_TRUE;
+
+        /* Allocate memory for the yuv_image */
+        unsigned char * yuv_image;
+        int width = cinfo.output_width;
+        int height = cinfo.output_height;
+        int channels = cinfo.output_components;
+        yuv_image = (unsigned char *)calloc(1, width * height * channels);
+
+        JDIMENSION num_scanlines;
+        unsigned char * row_pointer[1];
+        while (cinfo.output_scanline < height) {
+            row_pointer[0] = &yuv_image[(cinfo.output_scanline) * width * channels];
+            jpeg_read_scanlines(&cinfo, row_pointer, 1);
+        }
+
+        rgb_to_i420(yuv_image, (unsigned char *)output->buf, width, height);
+        output->size = width*height*3/2;
+
+        // PJ_LOG(4,(THIS_FILE, "Decode out color:%d output_size %d channels %d", cinfo.out_color_space, output->size, channels));
+
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        // PJ_LOG(4, (THIS_FILE, "Close JPEG decoder"));
+
+        free(yuv_image);
+        free(_input_buf);
+    }
+
     return PJ_SUCCESS;
 }
 

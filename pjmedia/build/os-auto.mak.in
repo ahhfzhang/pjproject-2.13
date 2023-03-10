@@ -153,6 +153,11 @@ export CODEC_OBJS += and_aud_mediacodec.o and_vid_mediacodec.o
 endif
 
 #
+# Libjpeg-turbo
+#
+export CFLAGS += -I$(THIRD_PARTY)/jpeg/
+
+#
 # SRTP
 #
 ifneq (@ac_external_srtp@,0)
